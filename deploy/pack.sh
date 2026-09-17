@@ -33,9 +33,14 @@ find ./backend -type d -name '__pycache__' -prune -exec rm -rf {} + 2>/dev/null 
 
 # ---------- 3. 打包 ----------
 # 只收「要上传的东西」，用白名单，避免 exclude 规则写漏
-# 注意两个坑：
+# 注意三个坑：
 #   a) dist-upload 必须排除，否则包会把自己打进去（包中包，越传越大）
-#   b) worker.env 必须排除，里面有 WORKER_TOKEN
+#   b) worker.env / app.env 含令牌与密钥，必须排除
+#   c) deploy/ 下还有两个**非 .env 结尾**的密钥文件也必须排除：
+#        deploy/.backup-pass     异地备份的加密口令
+#        deploy/backup-mail.env  SMTP 授权码与收件人
+#      2026-09-17 发现：早期版本漏了 c)，凭证检查正则也抓不到（只匹配名叫 .env 的），
+#      等于每次打包都会把加密口令和邮箱授权码一起装进产物。
 echo "==> 打包"
 tar -czf "$OUT" \
     --exclude="$OUT" \
@@ -44,6 +49,8 @@ tar -czf "$OUT" \
     --exclude='backend/data' \
     --exclude='backend/app.env' \
     --exclude='worker/worker.env' \
+    --exclude='deploy/.backup-pass' \
+    --exclude='deploy/backup-mail.env' \
     --exclude='__pycache__' \
     backend frontend worker deploy reports 2>/dev/null || {
         echo "xx 打包失败（tar 退出码 $?）" >&2
@@ -55,7 +62,9 @@ echo "==> 已生成: $OUT"
 echo "    体积: $(du -sh "$OUT" | cut -f1)"
 echo
 echo "==> 检查包内是否误含凭证（应当为空）"
-if tar -tzf "$OUT" | grep -E '(^|/)\.env$|(^|/)worker\.env$|\.db$|\.db-wal$|\.rdb$' | grep -v '\.example$'; then
+# 宽匹配：任何 *.env / *.pass / *.db / *.rdb 都拦下（example 模板除外）。
+# 不要用「精确文件名」列表 —— 那种写法漏一个就等于没查。
+if tar -tzf "$OUT" | grep -E '\.(env|pass|db|db-wal|rdb)$' | grep -v example; then
     echo "    !! 发现疑似凭证文件，请检查后重新打包"
     rm -f "$OUT"
     exit 1
