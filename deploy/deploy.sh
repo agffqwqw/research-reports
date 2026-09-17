@@ -69,10 +69,14 @@ export DEBIAN_FRONTEND=noninteractive
 # ============================================================
 # 1. 系统依赖
 # ============================================================
-log "1/9 安装系统依赖（python3-venv / caddy / fail2ban / rsync）"
+log "1/9 安装系统依赖（python3-venv / caddy / fail2ban / rsync / sqlite3）"
 
 apt-get update -qq
-apt-get install -y -qq python3-venv python3-pip curl rsync
+# ⚠️ sqlite3 必须装：deploy/backup.sh 用 `sqlite3 .backup` 做**在线一致快照**（不是裸 cp）。
+#    2026-09-17 真实踩过这个坑：缺它时 backup.sh 因 set -euo pipefail **直接中止**
+#    （连后面的 Redis 备份也跑不到），而日志里只有一行 "sqlite3: command not found"
+#    —— 连续两天无人发觉，名义 RPO=1 天、实际已成 ∞。
+apt-get install -y -qq python3-venv python3-pip curl rsync sqlite3
 
 # ---------- Redis ----------
 if ! command -v redis-server >/dev/null 2>&1; then
@@ -373,6 +377,8 @@ cat <<'EOF'
   已自动装好的定时任务：
     - 每 5 分钟  服务监测（异常即发邮件给 ADMIN_EMAIL）
     - 每天 03:15 数据备份（SQLite + Redis，保留 14 天）
+    - 每天 03:20 异地备份（加密后邮件外发；需先完成下面第 3 项配置）
+    - 每 6 小时  主动告警（备份新鲜度 / 磁盘 / 内存 / 负载）
 
   ⚠ 还需要你手工做两件事：
     1) 云平台防火墙放行 80 端口（默认只有 22 和 ICMP）
@@ -387,7 +393,23 @@ cat <<'EOF'
       改完执行：systemctl restart research-reports
       ⚠ 不填的话，错误页上「已自动邮件通知」这句就是空头承诺。
 
+    3) 配置「异地备份」（⚠ 不配的话 03:20 那条 cron 每天都会失败）：
+      a) 生成加密口令 —— 一次即可，**务必离线另存一份**
+         （服务器没了、口令也没了，备份就是废纸）
+           openssl rand -base64 24 > /opt/research-reports/deploy/.backup-pass
+           chmod 600 /opt/research-reports/deploy/.backup-pass
+      b) 写 SMTP 与收件人（两个文件都是 600 root，且已被 .gitignore 排除）
+           printf '%s\n' \
+             'MAIL_HOST=smtp.163.com' 'MAIL_PORT=465' \
+             'MAIL_USER=你的邮箱@163.com' 'MAIL_PASSWORD=SMTP授权码' \
+             'MAIL_FROM=你的邮箱@163.com' 'BACKUP_TO=收件邮箱' \
+             > /opt/research-reports/deploy/backup-mail.env
+           chmod 600 /opt/research-reports/deploy/backup-mail.env
+      c) 立刻验证一次（应打印「已发送至 ...」；缺配置时会明确报缺哪几项）
+           /opt/research-reports/deploy/offsite-backup.py
+
   回滚：bash rollback.sh        （回退到上一版代码，不动数据）
   备份：bash backup.sh          （已加进 crontab，也可手动跑）
+  告警自检：python3 /opt/research-reports/deploy/alert.py --dry-run
 ============================================================
 EOF
