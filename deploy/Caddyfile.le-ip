@@ -1,0 +1,171 @@
+# ============================================================
+# Caddy 反代配置 · 研报站点（IP + 免费 HTTPS 版）
+# 目标：https://203.0.113.10  —— 不买域名、不备案、真证书（浏览器不报警告）
+# 放置路径：/etc/caddy/Caddyfile
+# 生效方式：sudo systemctl reload caddy
+# 版本：v3（2026-09-17）
+#   v2  2026-09-16  对齐现网自签版并替换为 LE 版（补 default_sni 与 /docs 透传）
+#   v3  2026-09-17  删除 /demo 反代段（redis-demo 对外路由已下线）
+# ============================================================
+# 【本版相对现网自签版的改动】
+#   1. tls 块：issuer internal（自签/浏览器警告）→ issuer acme（Let's Encrypt 真证书）
+#   2. 保留 default_sni —— 关键，见下
+#   3. 保留 /docs* /redoc* /openapi.json 透传 —— 关键，见下
+#   4. HSTS 仍保持关闭（与现网一致，理由见下）
+#
+# 【生效前提 —— 重要】
+#   本配置靠 Let's Encrypt 的 IP 证书（2026-01 GA 开放）。
+#   IP 证书**只支持 HTTP-01 验证**，因此必须满足：
+#     1. 云防火墙放行 80  ← HTTP-01 必需，Let's Encrypt 从公网回连验证
+#     2. 云防火墙放行 443 ← HTTPS 访问
+#   ⚠️ 顺序：**先放行端口，再 reload caddy**。
+#      reload 会立刻发起 ACME 申请；80 未通时必然失败并进入退避重试。
+#
+#   证书有效期 6 天，Caddy 自动续期（约剩 1/3 时触发）。
+#   ⚠️ 续期同样依赖 80 可达 → **80 必须长期保持开放**，
+#      一旦关闭，6 天后证书过期，全站 HTTPS 失效。
+# ============================================================
+
+# ============================================================
+# 全局选项
+# ============================================================
+{
+	# ⚠️ 必须保留：客户端用 IP 访问时**不发送 SNI**（RFC 规定 SNI 只放域名），
+	#    Caddy 找不到匹配的站点就会在 TLS 握手阶段回 internal error，
+	#    表现为浏览器直接连不上（不是证书警告，而是压根握不上手）。
+	#    指定默认 SNI 后，无 SNI 的连接会落到这张证书上。
+	default_sni 203.0.113.10
+
+	# 本段只对 Caddy 内置 CA（internal issuer）生效，换用 ACME 后已无用。
+	# 保留是为了：将来若要临时切回自签（例如 ACME 出问题时的应急方案），
+	# 不必再翻资料找这段配置。无副作用。
+	pki {
+		ca local {
+			intermediate_lifetime 8760h
+		}
+	}
+}
+
+# ============================================================
+# HTTPS 主站 · Let's Encrypt IP 证书
+# ============================================================
+https://203.0.113.10 {
+	# ---------- Let's Encrypt IP 证书 ----------
+	# issuer acme：强制走 ACME。**不写这行，Caddy 对 IP 地址可能用 internal 自签 CA**
+	#              → 浏览器证书警告（这正是现网自签版的状况）。
+	# profile shortlived：IP 证书唯一被接受的 profile（有效期 6 天 / 160h）。
+	# disable_tlsalpn_challenge：IP 证书不支持 TLS-ALPN-01，必须走 HTTP-01。
+	tls {
+		issuer acme {
+			profile shortlived
+			disable_tlsalpn_challenge
+		}
+	}
+
+	# ---------- redis-demo：已下线（2026-09-17）----------
+	# 原先这里有一段 handle_path /demo/* → 127.0.0.1:8080 的反代。
+	# 2026-09-17 审计确认 /demo 在前后端均无任何引用，且该服务存在
+	# 「单一密码 + 零限流 + root 运行」的叠加风险，已按决策 D1 方案 A 删除。
+	#
+	# 同时已完成的服务侧加固（即使将来要重新暴露也已就绪）：
+	#   · /opt/app.py 监听地址 0.0.0.0:8080 → 127.0.0.1:8080（可用 BIND_HOST 覆盖）
+	#   · redisapp.service 新增 User=/Group=redisapp，不再以 root 运行
+	#   · /demo/login 新增进程内限流：5 次 / 5 分钟，超限封禁 900 秒（返回 429）
+	#
+	# ⚠️ 若要重新对外暴露，请在下方自行添加 handle_path，并确认 APP_PASSWORD 强度
+	#    （当前长度 11 位，与历史弱口令长度一致，建议更换）。
+
+	# ---------- 研报站点 API ----------
+	# 前端所有请求都用相对路径 /api/...，同源部署天然无跨域。
+	# 该后端已启用 slowapi 限流（login 10/min 等），见 backend/app/ratelimit.py
+	handle /api/* {
+		reverse_proxy 127.0.0.1:8081
+	}
+
+	# ---------- 健康检查透传（供外部探活）----------
+	handle /health {
+		reverse_proxy 127.0.0.1:8081
+	}
+
+	# ---------- 接口文档路径：必须透传给后端 ----------
+	# 为什么必须显式写这几条：
+	#   后端关闭文档后 /docs 会返回 404，但如果不透传，请求会落到下面的
+	#   SPA 回退规则上 → 返回 index.html 并给出 **HTTP 200**，
+	#   语义上等于「这个路径存在但内容是首页」，既误导排查也掩盖真实状态。
+	#   透传之后：关就是 404，开就是 Swagger，单一控制点在 app.env 的 ENABLE_DOCS。
+	handle /docs* {
+		reverse_proxy 127.0.0.1:8081
+	}
+	handle /redoc* {
+		reverse_proxy 127.0.0.1:8081
+	}
+	handle /openapi.json {
+		reverse_proxy 127.0.0.1:8081
+	}
+
+	# ---------- 研报站点静态前端（Vue 构建产物）----------
+	root * /opt/research-reports/frontend/dist
+
+	# ---------- SPA 回退：非文件请求一律交给 index.html ----------
+	# 没有这段，直接刷新 /report/002594/2026H1 会 404
+	handle {
+		try_files {path} /index.html
+		file_server
+	}
+
+	# ---------- 压缩 ----------
+	encode gzip zstd
+
+	# ---------- 错误页 ----------
+	# 404 单独处理：它对用户是「找错了地方」，不是「网站崩了」，
+	# 用同一套崩溃文案会误导，所以让它回首页。
+	handle_errors {
+		@404 expression {err.status_code} == 404
+		handle @404 {
+			rewrite * /index.html
+			file_server
+		}
+		# 5xx 及其它错误 → 崩溃说明页
+		root * /opt/research-reports/frontend/dist
+		rewrite * /error.html
+		file_server
+	}
+
+	# ---------- 安全响应头 ----------
+	header {
+		X-Content-Type-Options nosniff
+		X-Frame-Options SAMEORIGIN
+		Referrer-Policy strict-origin-when-cross-origin
+
+		# HSTS 刻意保持关闭（沿用现网判断）：
+		#   ① HSTS 面向主机名，浏览器对 **IP 字面量** 通常不强制 → 开了也基本无效
+		#   ② 一旦下发，将来临时想用 HTTP 调试可能被自己锁住
+		#   ③ IP 证书 6 天有效且依赖 80 续期，万一续期链条断了，
+		#      没有 HSTS 至少还留有余地
+		# 将来若补了域名，再打开下面这行：
+		# Strict-Transport-Security "max-age=31536000; includeSubDomains"
+
+		-Server
+	}
+
+	# ---------- 访问日志 ----------
+	# ⚠️ 该日志被 fail2ban 的 caddy-research-reports jail 读取 → 改动路径需同步改 jail
+	log {
+		output file /var/log/caddy/research-reports.access.log {
+			roll_size 10MiB
+			roll_keep 5
+			roll_keep_for 720h
+		}
+		format console
+	}
+}
+
+# ============================================================
+# HTTP 强制跳转 HTTPS
+# ============================================================
+# 只做 301 跳转、不提供任何内容 —— 这样不存在「用 HTTP 明文传密码」的口子。
+# Caddy 会自动在该端口上处理 ACME HTTP-01 验证请求（优先于本站点块）。
+# 代价：外网必须同时放行 443，否则站点访问不了。
+http://203.0.113.10 {
+	redir https://{host}{uri} permanent
+}

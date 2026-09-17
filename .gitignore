@@ -1,0 +1,41 @@
+# 凭证与配置
+app.env
+*.env
+!*.env.example
+
+# 异地备份的加密口令（绝不能进版本库）
+*.pass
+.backup-pass
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+
+# 数据（SQLite 与备份都不进版本库）
+data/
+*.db
+*.db-wal
+*.db-shm
+*.rdb
+
+# 前端（Vite）
+node_modules/
+dist/
+.vite/
+# 部署打包产物（由 deploy/pack.sh 生成，无需进版本库）
+dist-upload/
+
+# 改动前的快照备份（如 .backup-20260915-nav-alpha/）
+# 这些是临时回退用的，不属于源码
+.backup-*/
+
+# 日志与临时文件
+*.log
+*.bak
+tmp/
+
+# WorkBuddy 本地运行数据（记忆 / 任务工作区），不属于项目源码
+.workbuddy/

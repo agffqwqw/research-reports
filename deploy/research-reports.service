@@ -1,0 +1,66 @@
+# ============================================================
+# systemd 单元 · 研报站点后端（FastAPI / uvicorn）
+# 放置路径：/etc/systemd/system/research-reports.service
+# 生效方式：
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now research-reports
+# ============================================================
+[Unit]
+Description=上市公司研报站点 (FastAPI)
+Documentation=file:/opt/research-reports/deploy/README.md
+After=network-online.target redis-server.service
+Wants=network-online.target
+# Redis 挂了不该拖死本站（代码里有降级），所以只 After 不 Requires
+
+[Service]
+Type=simple
+
+# 工作目录决定 data/ 相对路径的落点，与 DB_PATH 的相对写法配合
+WorkingDirectory=/opt/research-reports/backend
+
+# 凭证与配置。文件权限必须 600，见 deploy/README.md
+EnvironmentFile=/opt/research-reports/backend/app.env
+
+# 用独立虚拟环境，不污染系统 Python
+#
+# 监听地址与端口**从 app.env 读取**（APP_HOST / APP_PORT），不再硬编码 ——
+# 这样改端口只需改 app.env 一处，不会出现「配置文件是 8081、systemd 还是 8080」的错位。
+#
+# ⚠️ 当前端口是 8081：服务器上 8080 已被 redisapp（redis-demo）占用。
+ExecStart=/opt/research-reports/venv/bin/uvicorn app.main:app \
+    --host ${APP_HOST} --port ${APP_PORT} \
+    --proxy-headers --forwarded-allow-ips='127.0.0.1' \
+    --workers 1
+
+# 单 worker：SQLite 写入 + 内存中的简单状态，多 worker 无收益且有锁竞争
+# --proxy-headers 让邮件里的链接能拿到正确的外部地址（Caddy 转发）
+
+Restart=always
+RestartSec=3
+
+# 强杀前留 10 秒优雅退出（关闭 SQLite 连接池）
+KillSignal=SIGTERM
+TimeoutStopSec=10
+
+# ---------- 文件创建权限（关键）----------
+# 默认 umask 是 022，服务创建的 app.db 会是 **644（所有用户可读）** ——
+# 数据库里存着用户邮箱与 bcrypt 哈希，不该对全员开放。
+# UMask=0077 让服务创建的文件一律 600、目录一律 700（只有属主能访问）。
+#
+# 注意：UMask 只影响**新建**文件，已存在的旧文件仍需 chmod（deploy.sh 已包含）。
+UMask=0077
+
+# 日志进 journald
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=research-reports
+
+# ---------- 加固（最小权限）----------
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/opt/research-reports/backend/data /var/log/research-reports
+
+[Install]
+WantedBy=multi-user.target

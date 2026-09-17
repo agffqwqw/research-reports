@@ -1,0 +1,40 @@
+# ============================================================
+# fail2ban jail · 研报站点
+# 放置路径：/etc/fail2ban/jail.d/caddy-research-reports.local
+#
+# 只新增本 jail，不动 /etc/fail2ban/jail.conf（Debian 升级会覆盖该文件）。
+# jail.d/ 下的 *.local 优先级更高，且不会与升级冲突。
+# ============================================================
+
+[caddy-research-reports]
+enabled  = true
+filter   = caddy-research-reports
+logpath  = /var/log/caddy/research-reports.access.log
+# 日志只追加不轮转时，maxlines 限制每次读取的行数，避免首次启动扫全量日志
+maxlines = 2000
+
+# ---------- 阈值设计 ----------
+# 与应用层 slowapi（登录 10/分钟）刻意错开：
+#   slowapi   管「瞬时爆发」—— 几秒内刷十几次，立刻 429
+#   fail2ban  管「持续试探」—— 10 分钟内累计 15 次失败就封 1 小时
+#
+# 为什么 maxretry 不设更小（如 5）：
+#   正常用户忘记密码、输错验证码很常见，一次会话就可能失败 3~5 次。
+#   阈值过小会把真实用户也封掉，而 NAT 场景（多人共用出口 IP）误伤面更大。
+maxretry = 15
+findtime = 600
+bantime  = 3600
+
+# 递增封禁：反复触发的 IP 越封越久（第二次 2h、第三次 4h…）
+bantime.increment = true
+bantime.factor    = 2
+bantime.maxtime   = 86400
+
+# ---------- 白名单 ----------
+# 默认 ignoreip 已含 127.0.0.1/8 与 ::1；这里再显式写出，避免被其他配置文件覆盖
+# 服务器自身回环 + 私有网段（同 VPC 内的探测不参与封禁）
+ignoreip = 127.0.0.1/8 ::1 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16
+
+# 封禁动作：只封 80/443 的入站，**绝不动 SSH**（22）
+# 用 iptables-multiport 限定端口，避免把管理通道一起封掉
+action = iptables-multiport[name=caddy-research-reports, port="http,https", protocol=tcp]

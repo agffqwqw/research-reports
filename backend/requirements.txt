@@ -1,0 +1,34 @@
+# ============================================================
+# 后端依赖（Python 3.11+）
+# 安装：/opt/venv/bin/pip install -r requirements.txt
+# ============================================================
+
+# Web 框架与服务器
+fastapi>=0.115
+uvicorn[standard]>=0.32
+
+# 模板与表单
+jinja2>=3.1
+python-multipart>=0.0.9
+
+# 数据存储
+# SQLite 由 Python 标准库 sqlite3 提供，无需额外依赖
+redis>=5.0
+
+# 认证与安全
+PyJWT>=2.8
+bcrypt>=4.0
+itsdangerous>=2.2
+
+# 接口限流（应用层）
+# 与网络层的 fail2ban 互补：fail2ban 封恶意 IP（请求到不了应用），
+# slowapi 按接口给配额（防正常 IP 的滥用与慢速爆破）。
+# 计数走 Redis；Redis 不可用时自动降级为内存计数，不影响站点可用性。
+slowapi>=0.1.9
+
+# 中文处理（右侧 A-Z 索引取公司简称拼音首字母）
+# 纯 Python、无 C 扩展；缺失时 public.py 会自动降级，不影响站点可用
+pypinyin>=0.53
+
+# 邮件（SMTP 方式，需在 app.env 配置授权码）
+# 使用标准库 smtplib，无需额外依赖

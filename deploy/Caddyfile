@@ -1,0 +1,162 @@
+# ============================================================
+# Caddy 反代配置 · 研报站点（当前生效版 = IP 直访 + 自签证书）
+# 放置路径：/etc/caddy/Caddyfile
+# 生效方式：sudo systemctl reload caddy
+# 最后核对：2026-09-17
+# ============================================================
+# 【当前状态】本文件与服务器 /etc/caddy/Caddyfile 保持一致（自签版）。
+#
+# ── 为什么现在用自签 ───────────────────────────────────────
+#   写这份配置时以为 Let's Encrypt 不支持纯 IP 证书，故用 Caddy 内置 CA 自签。
+#   ✅ 传输确实加密 —— 抗同 WiFi 嗅探、运营商明文抓取
+#   ⚠️ 浏览器会显示「不安全 / 证书不受信任」—— 面向公众的站点会流失访客
+#
+# ── 下一步：换成 Let's Encrypt 的 IP 地址证书 ──────────────
+#   LE 已于 2026-01 起 GA 支持 IP 证书，**无需域名、无需 ICP 备案**。
+#   见同目录 Caddyfile.le-ip —— 开放日部署它即可，其余配置一行不用改。
+#   ⚠️ 它强制 6 天有效期，且**只支持 HTTP-01**（80 必须长期开放，续期也靠 80）。
+#
+# ── 端口要求（重要）────────────────────────────────────────
+#   下面做了「HTTP 强制跳转 HTTPS」，因此开放外网时必须**同时放行 443**，
+#   只开 80 会导致站点完全无法访问（80 只做跳转，不提供内容）。
+#
+# ── 端口分配（2026-09-17 核对）─────────────────────────────
+#   443/80  Caddy：研报站点（根路径）
+#   8081    研报站点后端 uvicorn（仅回环）
+#   8080    redis-demo（仅回环；对外路由已下线）
+#   2019    Caddy 管理 API（仅回环）
+# ============================================================
+
+# ============================================================
+# 全局选项
+# ============================================================
+{
+	# ⚠️ 必须：客户端用 IP 访问时**不发送 SNI**（RFC 规定 SNI 只放域名），
+	#    Caddy 找不到匹配的站点就会在 TLS 握手阶段回 internal error，
+	#    表现为浏览器直接连不上（不是证书警告，而是压根握不上手）。
+	#    指定默认 SNI 后，无 SNI 的连接会落到这张证书上。
+	default_sni 203.0.113.10
+
+	# ⚠️ 必须：Caddy 本地 CA 的**中间证书默认只有 7 天**，
+	#    叶子证书的 lifetime 一旦超过它就会被强制压缩
+	#    （日志：cert lifetime would exceed issuer NotAfter, clamping lifetime）。
+	#    所以想拿到长期证书，得先把 CA 的 intermediate 寿命调长。
+	pki {
+		ca local {
+			intermediate_lifetime 8760h
+		}
+	}
+}
+
+# ============================================================
+# HTTPS 主站 · 自签证书
+# ============================================================
+https://203.0.113.10 {
+	# 用 Caddy 内置 CA 签发本地证书（不向外部 CA 申请，无需域名）
+	#
+	# 必须显式指定 lifetime：Caddy 的 internal 证书**默认只有 12 小时**
+	# （那是为本地开发设计的短周期）。本机是长期使用，12 小时会导致
+	# 浏览器每天都要重新接受一次证书 —— 反而让人觉得站点"有问题"。
+	# 这里设为 1 年；Caddy 仍会在到期前自动续签。
+	tls {
+		issuer internal {
+			lifetime 8760h
+		}
+	}
+
+	# ---------- redis-demo：已下线（2026-09-17）----------
+	# 这里原有 handle_path /demo/* → 127.0.0.1:8080 的反代，已删除。
+	# 原因：审计确认前后端（backend/app 与 frontend/dist）对 /demo 均 **零引用**，
+	#       删除不影响站点任何功能；而该服务存在三重叠加风险 ——
+	#       ① /demo/login 单一密码认证 ② 零限流（slowapi 只管 8081、
+	#       fail2ban 过滤器只匹配 /api/auth/*）③ 进程以 root 运行。
+	# 已同时完成服务侧加固：绑 127.0.0.1、改为 redisapp 用户运行、
+	# /login 加限流（5 次/300 秒，超限封禁 900 秒）。
+
+	# ---------- 研报站点 API ----------
+	# 前端所有请求都用相对路径 /api/...，同源部署天然无跨域
+	handle /api/* {
+		reverse_proxy 127.0.0.1:8081
+	}
+
+	# ---------- 健康检查透传（供外部探活）----------
+	handle /health {
+		reverse_proxy 127.0.0.1:8081
+	}
+
+	# ---------- 接口文档路径：直接透传给后端 ----------
+	# 为什么必须显式写这几条：
+	#   后端关闭文档后 /docs 会返回 404，但如果不透传，请求会落到下面的
+	#   SPA 回退规则上 → 返回 index.html 并给出 **HTTP 200**，
+	#   语义上等于「这个路径存在但内容是首页」，既误导排查也掩盖真实状态。
+	#   透传之后：关就是 404，开就是 Swagger，单一控制点在 app.env 的 ENABLE_DOCS。
+	handle /docs* {
+		reverse_proxy 127.0.0.1:8081
+	}
+	handle /redoc* {
+		reverse_proxy 127.0.0.1:8081
+	}
+	handle /openapi.json {
+		reverse_proxy 127.0.0.1:8081
+	}
+
+	# ---------- 研报站点静态前端（Vue 构建产物）----------
+	root * /opt/research-reports/frontend/dist
+
+	# ---------- SPA 回退：非文件请求一律交给 index.html ----------
+	# 没有这段，直接刷新 /report/002594/2026H1 会 404
+	handle {
+		try_files {path} /index.html
+		file_server
+	}
+
+	# ---------- 压缩 ----------
+	encode gzip zstd
+
+	# ---------- 错误页 ----------
+	# 404 单独处理：它对用户是「找错了地方」，不是「网站崩了」，
+	# 用同一套崩溃文案会误导，所以让它回首页。
+	handle_errors {
+		@404 expression {err.status_code} == 404
+		handle @404 {
+			rewrite * /index.html
+			file_server
+		}
+		# 5xx 及其它错误 → 崩溃说明页
+		root * /opt/research-reports/frontend/dist
+		rewrite * /error.html
+		file_server
+	}
+
+	# ---------- 安全响应头 ----------
+	header {
+		X-Content-Type-Options nosniff
+		X-Frame-Options SAMEORIGIN
+		Referrer-Policy strict-origin-when-cross-origin
+		# HSTS 在自签阶段刻意不开：
+		# 一旦下发 HSTS，浏览器会长期强制 HTTPS（含子域），
+		# 将来若临时想用 HTTP 调试会被自己锁住。等换成正式证书再启用。
+		# Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		-Server
+	}
+
+	# ---------- 访问日志 ----------
+	log {
+		output file /var/log/caddy/research-reports.access.log {
+			roll_size 10MiB
+			roll_keep 5
+			roll_keep_for 720h
+		}
+		format console
+	}
+}
+
+# ============================================================
+# HTTP 强制跳转 HTTPS
+# ============================================================
+# 只做 301 跳转、不提供任何内容 —— 这样不存在「用 HTTP 明文传密码」的口子。
+# 代价：外网必须同时放行 443，否则站点访问不了。
+# 若临时需要 HTTP 直连（例如调试），把本段注释掉并 reload 即可。
+http://203.0.113.10 {
+	redir https://{host}{uri} permanent
+}
