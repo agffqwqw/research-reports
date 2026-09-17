@@ -38,6 +38,10 @@ import sys
 SSH = r"C:\Windows\System32\OpenSSH\ssh.exe"
 # 支持环境变量覆盖，便于测试「服务器不可达」这类路径
 HOST = os.environ.get("WATCH_HOST", "root@203.0.113.10")
+# 站点对外地址（证书 SAN / Caddy site 块用的就是它）。
+# 探测时用 --resolve 把它指到 127.0.0.1，这样 SNI 与 Host 都是真实域名/IP，
+# 才能命中 Caddy 的 site 块，而不是落到默认站点上。
+SITE = os.environ.get("WATCH_SITE", "203.0.113.10")
 SERVICES = ["research-reports", "caddy", "redis-server"]
 DISK_WARN_PCT = 85
 
@@ -50,7 +54,15 @@ REMOTE_SCRIPT = "\n".join([
     "done",
     'echo "HEALTH $(curl -s --max-time 6 -o /dev/null -w \'%{http_code}\' http://127.0.0.1:8081/health)"',
     'echo "HEALTH_BODY $(curl -s --max-time 6 http://127.0.0.1:8081/health)"',
-    'echo "VIA_CADDY $(curl -s --max-time 6 -o /dev/null -w \'%{http_code}\' http://127.0.0.1/)"',
+    # ⚠️ 下面两条是「入口探活」，取样点必须区分协议：
+    #   80  → 期望 3xx（HTTP 强制跳转 HTTPS，**跳转本身就是健康的表现**）
+    #   443 → 期望 200（真正在服务首页）
+    #   历史 bug：早期只用 http://127.0.0.1/ 探活并要求 == 200，
+    #   但该请求被 Caddyfile 设计为跳转 → 常年误报「Caddy 异常」。
+    'echo "HTTP_REDIR $(curl -s --max-time 6 -o /dev/null -w \'%%{http_code}\' '
+    '--resolve %s:80:127.0.0.1 http://%s/)"' % (SITE, SITE),
+    'echo "VIA_CADDY $(curl -sk --max-time 6 -o /dev/null -w \'%%{http_code}\' '
+    '--resolve %s:443:127.0.0.1 https://%s/)"' % (SITE, SITE),
     "echo \"DISK $(df -P / | awk 'NR==2 {print $5}' | tr -d '%')\"",
     'echo "RESTARTS $(systemctl show research-reports -p NRestarts --value 2>/dev/null || echo 0)"',
 ])
@@ -133,7 +145,12 @@ def collect_problems():
 
     caddy_code = data.get("VIA_CADDY", "0")
     if caddy_code != "200":
-        problems.append("经 Caddy 访问首页异常（HTTP %s）—— 可能是 Caddy 配置或反代问题" % caddy_code)
+        problems.append("经 Caddy 的 HTTPS 首页异常（HTTP %s）—— 可能是 Caddy 配置 / 证书 / 反代问题" % caddy_code)
+
+    # 80 端口期望「跳转」（3xx）而不是 200 —— 跳转正是 HTTP→HTTPS 强制策略在生效
+    redir_code = data.get("HTTP_REDIR", "0")
+    if not redir_code.startswith("3"):
+        problems.append("80 端口未按预期跳转 HTTPS（HTTP %s）—— 可能是 Caddyfile 少了 redir 段" % redir_code)
 
     disk = -1
     try:
@@ -153,7 +170,8 @@ def collect_problems():
     for name, state in svc_pairs:
         details.append("  %-20s %s" % (name, state))
     details.append("  %-20s HTTP %s" % ("后端 /health", health_code))
-    details.append("  %-20s HTTP %s" % ("经 Caddy 首页", caddy_code))
+    details.append("  %-20s HTTP %s" % ("经 Caddy 的 HTTPS 首页", caddy_code))
+    details.append("  %-20s HTTP %s" % ("80 端口跳转", redir_code))
     details.append("  %-20s %s" % ("磁盘使用率", ("%d%%" % disk) if disk >= 0 else "?"))
     details.append("  %-20s %d 次" % ("服务重启次数", restarts))
 
