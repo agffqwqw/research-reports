@@ -66,9 +66,18 @@
 | **服务特权** | 研报站与 redis-demo 均**非 root 运行** | `systemctl show research-reports -p User` |
 | **数据库文件** | `app.db` 权限 `600` | `ls -l backend/data/app.db` 应为 `-rw-------` |
 
-> ⚠️ **两个必知的坑**：
-> 1. **改 sshd 必须双位置同改** —— `/etc/ssh/sshd_config` **和** `/etc/ssh/sshd_config.d/50-cloud-init.conf`（后者经 `Include` 加载会覆盖主配置）。
+> ℹ️ **SSH 加固已自动化**：由 `deploy/ssh-harden.sh` 完成，`deploy.sh` 的**步骤 6.5** 会调用它。
+> 它内置**自锁保护** —— 系统上找不到任何 `authorized_keys` 时**直接拒绝执行**，
+> 避免「关掉密码登录 + 没有任何密钥」把人永久锁在门外。
+> 只想体检不动手：`bash deploy/ssh-harden.sh`（不带 `--apply`）。
+
+> ⚠️ **三个必知的坑**：
+> 1. **改 sshd 必须双位置同改** —— `/etc/ssh/sshd_config` **和** `/etc/ssh/sshd_config.d/50-cloud-init.conf`（后者经 `Include` 加载会覆盖主配置）。`ssh-harden.sh` 已处理。
 > 2. **关闭密码登录会让 OrcaTerm 的「终端连接(SSH)+密码」失效** —— 改用「免密连接(TAT)」或 VNC，或直接本机 `ssh root@...`。
+> 3. **重载用 `reload` 不用 `restart`** —— `restart` 会断开当前正在用的连接，一旦新配置有问题就再也进不来。
+>
+> 📌 **这条曾经掉过链子**：SSH 加固在 2026-09-16 只改在服务器上、**没进仓库**，
+> 导致 09-17 重建演练时发现「从零重建会退回 Ubuntu 默认」。**加固必须进版本库，否则等于没有。**
 
 ---
 
@@ -105,6 +114,16 @@
 > 3. **系统必须装 `sqlite3`**（`apt-get install -y sqlite3`）。缺它时 `backup.sh` 会因 `set -euo pipefail` 直接中止，**连 Redis 那步也跑不到**，而日志里只有一行 `sqlite3: command not found` —— 极易被忽略。
 
 **异地备份的加密口令**：`deploy/.backup-pass`（600 root）。按既定取舍，口令**随邮件正文一并发出** —— 代价是这层加密**防不住「邮箱账号被攻破」**，只防"邮件被误转发／备份文件单独泄露"。
+
+> 🔴 **`deploy/.backup-pass` 是本项目唯一「丢了就不可恢复」的东西 —— 请按这一条对待它**
+>
+> - 它**不在版本库里**（这是对的，密钥不该进 git），`deploy.sh` 也**不会**重新生成它
+> - 它一丢 → **邮箱里所有加密备份永远解不开**，异地备份这道防线直接归零
+> - 把最坏情况摆出来：**服务器整机损毁 + 本机硬盘也坏 + 口令没另存 = 数据全丢**
+>
+> **要求**：生成后立刻做**至少一份「仓库外 + 机器外」的离线备份**
+> （密码管理器 / 另一台设备 / 纸质均可）。
+> ⚠️ 只把它放在本机的另一个目录里，**等于没备份** —— 那和服务器在同一个故障域里。
 
 **日常巡检**：
 
@@ -216,7 +235,10 @@ curl -s http://127.0.0.1:8081/api/config-check | python3 -m json.tool
 | `offsite-backup.py` | 打包加密 + 邮件外发（异地） | crontab，每天 03:20 |
 | `backup-mail.env` | 异地备份的 SMTP 与收件人配置 | 600 root，**勿提交** |
 | `.backup-pass` | 异地备份的加密口令 | 600 root，**勿提交** |
-| `healthcheck.py` | 服务存活监测 | crontab，每 5 分钟 |
+| `healthcheck.py` | 服务存活监测（站点是否活着） | crontab，每 5 分钟 |
+| `alert.py` | 主动告警（备份新鲜度 / 磁盘 / 内存 / 负载） | crontab，每 6 小时；可 `--dry-run` 自检 |
+| `alert-run.sh` | `alert.py` 的包装脚本（承载日志重定向） | 由 crontab 调用 |
+| `ssh-harden.sh` | **SSH 加固**（双位置同改 + 自锁保护） | 由 deploy.sh 步骤 6.5 调用；不带 `--apply` 即体检 |
 | `research-reports.service` | systemd 单元 | 由 deploy.sh 安装 |
 | `Caddyfile` | 反代 + 静态托管（**当前生效版 = 自签**） | 由 deploy.sh 安装 |
 | `Caddyfile.le-ip` | **对外开放日待部署**的 LE 版 | 见第四节 |
@@ -233,6 +255,21 @@ curl -s http://127.0.0.1:8081/api/config-check | python3 -m json.tool
 - **新增异地备份**：`offsite-backup.py` — AES-256-CBC 加密后邮件外发，每日 03:20；加密可逆性已验证
 - **`/docs` 类接口默认关闭**：`ENABLE_DOCS` 默认 `false`（fail-closed）
 - **`app.py` 版本归一**：合并仓库新版（`/hash`、前缀白名单）与本次加固，三远程 + 服务器四处一致
+- **修复 `/api/config-check` 鉴权回归**：9/16 的修复只改在服务器上、**未进版本库** → 一次重新部署即被覆盖回匿名可访问（实测泄露完整配置）。已落库复测 401
+  > 📌 这条与下面的 SSH 加固是**同一个模式**：**加固只落在机器上，等于没有。**
+- **`APP_PASSWORD` 轮换**：原为弱口令，已换 24 位随机值
+- **对外开放并收回**：放行 80/443 → 部署 `Caddyfile.le-ip` → LE 签发真实 IP 证书、全部验收通过 → 业务验证完成后**按需收回端口**（回到 22 + ICMP）
+- **修复 `pack.sh` 密钥泄漏**：原先未排除 `deploy/.backup-pass` 与 `deploy/backup-mail.env`，且凭证检查正则也抓不到它们（只匹配名叫 `.env` 的）→ **每次打包都会把加密口令与邮箱授权码装进产物**
+- **② 级重建演练（在生产机上做，成功）**：停服务 + 删站点目录 + 卸载系统包 → 从零重建
+  - **实测 RTO：8 分 48 秒**（含 2 次排障）／**纯执行约 2–3 分钟** —— 远优于目标（≤1h / ≤2h）
+  - 抓到两个**只在真实重建时才暴露**的致命缺陷并修复：
+    - ① **CRLF 行尾** —— Windows 工作区被 `core.autocrlf` 转 CRLF，而 `pack.sh` 是从工作区打包 → Linux 上 `set -euo pipefail` 变成 `set -euo pipefail\r`，**脚本第一行就挂**
+      （治愈：新增 `.gitattributes`；`pack.sh` 加「归一 **+ 校验**」步骤）
+    - ② **`gpg --dearmor` 在无 tty 环境失败** —— keyring 已存在时询问是否覆盖，TAT/cron 无控制终端
+      （治愈：`--batch --yes`；原脚本**自称幂等，但第二次运行必挂**）
+  - 完整报告见 `docs/rebuild-drill-20260917.md`
+- **SSH 加固纳入可重建资产**：新增 `ssh-harden.sh` 并接入 `deploy.sh` **步骤 6.5**
+  > 此前 SSH 加固只存在于机器上、仓库里只有文字描述 → **从零重建会退回 Ubuntu 默认（允许密码登录）**，且重建者不会收到提示。本项修复后 L5「可交付」才真正闭环。
 
 ### 2026-09-16
 - **SSH 加固**：关闭密码登录、限制 root 为密钥登录、`MaxAuthTries 3`
