@@ -31,6 +31,28 @@ fi
 # ---------- 2. 清掉 pycache（避免打包垃圾）----------
 find ./backend -type d -name '__pycache__' -prune -exec rm -rf {} + 2>/dev/null || true
 
+# ---------- 2.5 统一脚本行尾为 LF（防御性，必须做）----------
+# 为什么有 .gitattributes 还要做这一步：
+#   .gitattributes 只在 git **检出**时生效。若文件被编辑器 / AI 写入 / 跨平台拷贝
+#   改写过，工作区仍可能是 CRLF；而本脚本是「从工作区打包」→ CRLF 会原样进 tar。
+# 实测后果（2026-09-17 重建演练）：deploy.sh 带 CRLF 到 Linux 后，
+#   `set -euo pipefail` 变成 `set -euo pipefail\r`
+#   → bash 报 "set: pipefail: invalid option name"，脚本第一行就挂。
+# 这里就地归一，并且**校验**归一结果 —— 只做不验等于没做。
+echo "==> 统一脚本行尾为 LF"
+SHELL_LIKE=( -name '*.sh' -o -name '*.py' -o -name '*.service' \
+             -o -name '*.conf' -o -name '*.local' -o -name 'Caddyfile*' )
+find backend frontend worker deploy reports -type f \( "${SHELL_LIKE[@]}" \) \
+    -exec sed -i 's/\r$//' {} + 2>/dev/null || true
+CR_FILES="$(find backend frontend worker deploy reports -type f \( "${SHELL_LIKE[@]}" \) \
+    -exec grep -l $'\r' {} + 2>/dev/null || true)"
+if [ -n "$CR_FILES" ]; then
+    echo "xx 以下文件仍含 CR，拒绝打包：" >&2
+    printf '     %s\n' $CR_FILES >&2
+    exit 1
+fi
+echo "    ✓ 无 CR"
+
 # ---------- 3. 打包 ----------
 # 只收「要上传的东西」，用白名单，避免 exclude 规则写漏
 # 注意三个坑：

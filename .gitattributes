@@ -1,0 +1,33 @@
+# 统一行尾：仓库内文本文件一律 LF，检出到任何平台都一样。
+#
+# 为什么必须显式声明（2026-09-17 重建演练实测踩到）：
+#   本机是 Windows，git 默认 core.autocrlf=true 会把 .sh 检出成 CRLF；
+#   而 deploy/pack.sh 是「从工作区打包」——CRLF 会原样进 tar 包，
+#   到 Linux 上 `set -euo pipefail` 变成 `set -euo pipefail\r`，
+#   bash 报 "set: pipefail: invalid option name"，**deploy.sh 第一行就直接挂掉**。
+#   现象很有迷惑性：文件在 Linux 上看着完全正常，只有那一行报错。
+#
+# 注意：git 仓库里的 blob 本来就是 LF，问题只出在「工作区被转成 CRLF → 打包带走」。
+# 声明 eol=lf 后，Windows 上检出也是 LF，从根上消除这个坑。
+
+* text=auto eol=lf
+
+# 下面是「会在 Linux 上被直接执行/解析」的类型，再钉一遍，避免 * 规则被局部覆盖
+*.sh      text eol=lf
+*.py      text eol=lf
+*.service text eol=lf
+*.conf    text eol=lf
+*.local   text eol=lf
+Caddyfile       text eol=lf
+Caddyfile.*     text eol=lf
+
+# 二进制文件：明确声明，禁止任何行尾转换
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.ico  binary
+*.gz   binary
+*.rdb  binary
+*.db   binary
+*.zip  binary

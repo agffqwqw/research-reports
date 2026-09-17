@@ -86,10 +86,14 @@ systemctl enable --now redis-server
 redis-cli ping >/dev/null && echo "Redis: OK"
 
 # ---------- Caddy ----------
+# ⚠️ gpg 必须带 --batch --yes：keyring 文件已存在时 gpg 会问「是否覆盖」，
+#    在无控制终端的环境（TAT / CI / cron）里会直接失败：
+#      gpg: cannot open '/dev/tty': No such device or address
+#    2026-09-17 重建演练实测踩到 —— 脚本自称幂等，但这一步在第二次运行就挂了。
 if ! command -v caddy >/dev/null 2>&1; then
     apt-get install -y -qq debian-keyring debian-archive-keyring apt-transport-https
     curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' \
-        | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+        | gpg --batch --yes --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
     curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' \
         > /etc/apt/sources.list.d/caddy-stable.list
     apt-get update -qq
@@ -380,7 +384,7 @@ cat <<'EOF'
     - 每天 03:20 异地备份（加密后邮件外发；需先完成下面第 3 项配置）
     - 每 6 小时  主动告警（备份新鲜度 / 磁盘 / 内存 / 负载）
 
-  ⚠ 还需要你手工做两件事：
+  ⚠ 还需要你手工做三件事：
     1) 云平台防火墙放行 80 端口（默认只有 22 和 ICMP）
        这是「外网能不能打开」的唯一门槛，脚本改不了云平台。
 
