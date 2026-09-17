@@ -279,20 +279,33 @@ fi
 # ============================================================
 # 7. 服务监测 + 备份（crontab）
 # ============================================================
-log "7/9 安装定时任务（服务监测 + 数据备份）"
+log "7/9 安装定时任务（监测 + 本地备份 + 异地备份 + 告警）"
 
 mkdir -p /var/lib/research-reports /var/log/research-reports
 chmod 700 /var/lib/research-reports
+
+# 保证需要直接执行的脚本带 +x 位。
+# ⚠️ 为什么必须显式做：本机是 Windows，文件系统没有可执行位，pack.sh 打的 tar 包
+#    会把它们记成 644；解包到服务器后 crontab 直接调用就会 Permission denied。
+chmod +x "${APP_ROOT}"/deploy/*.sh 2>/dev/null || true
+chmod +x "${APP_ROOT}"/deploy/*.py 2>/dev/null || true
 
 # 错误页上写着「已自动邮件通知」—— 靠这个监测脚本让它成立。
 # 同一故障只通知一次，恢复时再发一封，避免变成邮件轰炸。
 CRON_HEALTH="*/5 * * * * ${VENV}/bin/python ${APP_ROOT}/deploy/healthcheck.py >> /var/log/research-reports/healthcheck.log 2>&1"
 CRON_BACKUP="15 3 * * * /bin/bash ${APP_ROOT}/deploy/backup.sh >> /var/log/research-reports/backup.log 2>&1"
+# 异地备份（加密后邮件外发）—— 必须有：否则重建后只剩「同盘备份」，盘坏了一起没
+CRON_OFFSITE="20 3 * * * ${APP_ROOT}/deploy/offsite-backup.py >> /var/log/research-reports/offsite.log 2>&1"
+# 主动告警（备份新鲜度 + 磁盘/内存/负载）—— 走包装脚本，重定向收在脚本内部
+CRON_ALERT="0 */6 * * * ${APP_ROOT}/deploy/alert-run.sh"
 
 CUR_CRON="$(crontab -l 2>/dev/null || true)"
 NEW_CRON="$CUR_CRON"
-for line in "$CRON_HEALTH" "$CRON_BACKUP"; do
-    key="$(echo "$line" | awk '{print $2, $3, $7}')"
+# 幂等：按「命令路径」判重。
+# key 从第 6 个字段起找第一个含 / 的字段 —— 因为有的行带解释器（python、/bin/bash）、
+# 有的不带（直接跑可执行脚本），用固定列号（如原来的 $7）会错位取到空值。
+for line in "$CRON_HEALTH" "$CRON_BACKUP" "$CRON_OFFSITE" "$CRON_ALERT"; do
+    key="$(echo "$line" | awk '{for(i=6;i<=NF;i++) if ($i ~ /\//) {print $i; exit}}')"
     if echo "$CUR_CRON" | grep -qF "$key"; then
         echo "  已存在，跳过: $key"
     else
@@ -311,6 +324,10 @@ crontab -l | sed 's/^/    /'
 echo "  --- 监测脚本试跑 ---"
 "${VENV}/bin/python" "${APP_ROOT}/deploy/healthcheck.py" || \
     echo "  （返回非 0 表示当前就有异常，详情见上方输出）"
+
+# 告警脚本同样试跑一次（--dry-run：只打印不发信）
+echo "  --- 告警脚本试跑（--dry-run）---"
+"${APP_ROOT}/deploy/alert.py" --dry-run || echo "  （告警脚本返回非 0，请检查）"
 
 # ============================================================
 # 8. 本机自检
