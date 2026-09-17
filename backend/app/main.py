@@ -5,12 +5,13 @@
 """
 import sys
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.responses import JSONResponse
 from slowapi.errors import RateLimitExceeded
 
 from app.config import config
 from app.db import db, get_conn, query_one
+from app.deps import get_admin
 from app.ratelimit import limiter, rate_limit_handler
 from app.redis_client import get_redis
 from app.routes import (
@@ -123,9 +124,15 @@ def health():
     return JSONResponse(result, status_code=code)
 
 
-@app.get("/api/config-check", summary="配置自检（仅启动阶段使用，后续应加保护）")
-def config_check():
-    """返回配置问题清单，便于部署后立即发现漏配的环境变量。"""
+@app.get("/api/config-check", summary="配置自检（需管理员权限）")
+def config_check(_: dict = Depends(get_admin)):
+    """返回配置问题清单，便于部署后立即发现漏配的环境变量。
+
+    ⚠️ 为什么要加鉴权：这个接口会暴露 base_url / db_path / redis 地址 / 邮件开关
+    与缺失项清单 —— 对扫描者相当于一张部署环境地图。
+    2026-09-16 首次加鉴权，但当时**只改在服务器上、没进版本库**，
+    后续一次重新部署即被覆盖回匿名可访问；2026-09-17 已同步到仓库。
+    """
     problems = config.check()
     return {
         "ok": not problems,
