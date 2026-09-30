@@ -401,7 +401,7 @@ cat <<'EOF'
     - 每天 03:20 异地备份（加密后邮件外发；需先完成下面第 3 项配置）
     - 每 6 小时  主动告警（备份新鲜度 / 磁盘 / 内存 / 负载）
 
-  ⚠ 还需要你手工做三件事：
+  ⚠ 还需要你手工做四件事：
     1) 云平台防火墙放行 80 端口（默认只有 22 和 ICMP）
        这是「外网能不能打开」的唯一门槛，脚本改不了云平台。
 
@@ -428,6 +428,15 @@ cat <<'EOF'
            chmod 600 /opt/research-reports/deploy/backup-mail.env
       c) 立刻验证一次（应打印「已发送至 ...」；缺配置时会明确报缺哪几项）
            /opt/research-reports/deploy/offsite-backup.py
+
+    4) 立刻补跑一次本地备份（⚠ 新机器上备份目录是空的）
+       不跑的话，首次 alert.py 必报「备份目录里找不到任何 app-*.db.gz」——
+       那是**正确告警**（新系统确实还没有备份），但容易被误判成故障。
+           bash /opt/research-reports/deploy/backup.sh
+           ls -lh /opt/research-reports-backups/data/   # 应看到 app-*.db.gz 与 dump-*.rdb
+       跑完再自检一遍（应显示「检查 4 项，异常 0 项」）：
+           /opt/research-reports/venv/bin/python /opt/research-reports/deploy/alert.py --dry-run
+       📌 2026-09-30 ③ 级重建演练实测：全新系统若跳过本步，alert 会在首日误报一次。
 
   回滚：bash rollback.sh        （回退到上一版代码，不动数据）
   备份：bash backup.sh          （已加进 crontab，也可手动跑）

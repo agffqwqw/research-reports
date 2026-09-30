@@ -39,19 +39,39 @@ find ./backend -type d -name '__pycache__' -prune -exec rm -rf {} + 2>/dev/null 
 #   `set -euo pipefail` 变成 `set -euo pipefail\r`
 #   → bash 报 "set: pipefail: invalid option name"，脚本第一行就挂。
 # 这里就地归一，并且**校验**归一结果 —— 只做不验等于没做。
+#
+# ⚠️ 2026-09-30 ③ 级重建演练踩坑：本段的「校验」曾**全量误报** ——
+#    42 个实测纯 LF 的文件被判为"含 CR"，打包被自己的防御逻辑拦死。
+#    根因：`grep -l $'\r'` 把 CR 字节**当作命令行参数**传递，Windows/Git Bash
+#          会吞掉 0x0D → grep 收到**空模式** → `grep -l ''` 匹配一切。
+#    同类失效方案：`awk '/\r$/'` 与 `grep -P '\r$'` —— Windows 文本模式会吃掉 CR，
+#          连真正 CRLF 的文件都测不出来（静默漏报，比误报更危险）。
+#    → 现改用**字节级**比对：`cmp -s "$f" <(tr -d '\r' < "$f")`
+#      不经过参数传递、不受文本模式影响，Linux 与本机 Git Bash 行为一致。
+#    教训：**防御逻辑本身也需要被验证** —— 一个永远说"不合格"的检查，
+#          和一个永远说"合格"的检查，危害是等价的。
 echo "==> 统一脚本行尾为 LF"
 SHELL_LIKE=( -name '*.sh' -o -name '*.py' -o -name '*.service' \
              -o -name '*.conf' -o -name '*.local' -o -name 'Caddyfile*' )
 find backend frontend worker deploy reports -type f \( "${SHELL_LIKE[@]}" \) \
     -exec sed -i 's/\r$//' {} + 2>/dev/null || true
-CR_FILES="$(find backend frontend worker deploy reports -type f \( "${SHELL_LIKE[@]}" \) \
-    -exec grep -l $'\r' {} + 2>/dev/null || true)"
+
+# 校验：把文件剥掉全部 CR 后与原件逐字节比对，不同即说明原件含 CR
+CR_FILES=""
+while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    if ! cmp -s "$f" <(tr -d '\r' < "$f"); then
+        CR_FILES="${CR_FILES}${f}"$'\n'
+    fi
+done < <(find backend frontend worker deploy reports -type f \( "${SHELL_LIKE[@]}" \))
+
 if [ -n "$CR_FILES" ]; then
     echo "xx 以下文件仍含 CR，拒绝打包：" >&2
-    printf '     %s\n' $CR_FILES >&2
+    printf '     %s\n' "$CR_FILES" >&2
+    echo "    (检测方式：cmp 字节级比对，非 grep)" >&2
     exit 1
 fi
-echo "    ✓ 无 CR"
+echo "    ✓ 无 CR（字节级比对校验）"
 
 # ---------- 3. 打包 ----------
 # 只收「要上传的东西」，用白名单，避免 exclude 规则写漏
