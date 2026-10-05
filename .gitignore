@@ -37,5 +37,34 @@ dist-upload/
 *.bak
 tmp/
 
+# ============================================================
+# 内部运维资料（不进公开仓库）
+# ============================================================
+# 理由：这些文档含服务器实例 ID、端口分配、备份邮箱服务商、快照 ID、
+#      以及「回环 SSH 隧道绕过被阻断端口」的完整方法 —— 对扫描者
+#      等于一份现成的攻击地图。研报数据（reports/）则**故意保留**：
+#      它们来自巨潮公开披露，且本来就在站点上公开展示。
+docs/rebuild-drill-*.md
+#
+# ⚠️ 内部运维手册：由原 deploy/README.md 改名而来（脱敏版另存为 deploy/README.md）。
+#    这一条**必须保留**。实测过：改名后若不加此规则，`git add -A` 会把这个
+#    含真实 IP / 实例 ID / 快照 ID 的手册直接推进公开仓库（2026-10-06 抓获）。
+#    通用写法：任何 *.internal.* 一律不对外。
+deploy/README.internal.md
+*.internal.*
+
+# Worker 运行残留与状态机
+# ⚠️ .server_watch_state.json 是「边沿触发」的状态机（同一故障只报一次）。
+#    一旦进版本库，任何一次 git pull 都会用别人的历史状态覆盖它 ——
+#    新机器上首次运行就会判定「已通知」而**静默不报**，恰在最需要告警时哑掉。
+worker/.server_watch_state.json
+worker/report_*.json
+worker/2026/
+worker/incident_*.md
+
+# 密钥/凭据改写后的备份（*.bak 规则匹配不到 worker.env.bak-20260917 这类名字）
+*.env.bak*
+*.env.bak-*
+
 # WorkBuddy 本地运行数据（记忆 / 任务工作区），不属于项目源码
 .workbuddy/

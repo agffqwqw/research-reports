@@ -35,7 +35,11 @@
 	#    Caddy 找不到匹配的站点就会在 TLS 握手阶段回 internal error，
 	#    表现为浏览器直接连不上（不是证书警告，而是压根握不上手）。
 	#    指定默认 SNI 后，无 SNI 的连接会落到这张证书上。
-	default_sni 203.0.113.10
+	#
+	# 站点地址从环境变量读（由 systemd 的 EnvironmentFile 注入，见 research-reports.service）：
+	#   在 app.env 里设 SITE_ADDRESS=<你的域名或公网IP>
+	# ⚠️ 本仓库不写死任何真实地址 —— 那既无必要，也等于对外公开你的服务器坐标。
+	default_sni {$SITE_ADDRESS}
 
 	# ⚠️ 必须：Caddy 本地 CA 的**中间证书默认只有 7 天**，
 	#    叶子证书的 lifetime 一旦超过它就会被强制压缩
@@ -51,7 +55,8 @@
 # ============================================================
 # HTTPS 主站 · 自签证书
 # ============================================================
-https://203.0.113.10 {
+# {$SITE_ADDRESS} 由环境变量注入（app.env 里的 SITE_ADDRESS）
+https://{$SITE_ADDRESS} {
 	# 用 Caddy 内置 CA 签发本地证书（不向外部 CA 申请，无需域名）
 	#
 	# 必须显式指定 lifetime：Caddy 的 internal 证书**默认只有 12 小时**
@@ -116,16 +121,52 @@ https://203.0.113.10 {
 	# ---------- 错误页 ----------
 	# 404 单独处理：它对用户是「找错了地方」，不是「网站崩了」，
 	# 用同一套崩溃文案会误导，所以让它回首页。
+	#
+	# ⚠️ 但**错误页重写会把状态码也改成 200**（2026-10-06 实测发现）。
+	#    后果：后端明明是 404 的 /docs，经 Caddy 出去变成「200 + 首页」，
+	#    语义上等于告诉扫描者「这个路径存在」—— 既误导排查，也掩盖真实状态，
+	#    把「关闭接口文档」这个安全措施整个抵消掉。
+	#    这与此前「SPA 回退吞掉 404」是同一类坑的第二个入口：
+	#    当时加了 /docs* 透传解决了 SPA 那一层，但 handle_errors 这一层
+	#    依然会把透传回来的 404 吃掉。
+	#    → 修法：**API 与文档类路径的 404 一律原样透出**，不参与"回首页"重写。
 	handle_errors {
+		# ① 机器可读路径（API / 文档 / 健康检查）的 404：原样透出，绝不重写。
+		#    用 path 匹配器而非复杂表达式，可读且不易出错。
+		#
+		#    ⚠️ respond 的语法是 `respond [<body>] [<status>]`，**第一个参数是响应体**。
+		#    写成 `respond "{err.status_code}" 404` 会退化成「空 body + 默认 200」
+		#    （实测：HTTP/2 200、content-length: 0、server: Caddy）——
+		#    比不修还糟：反正都是 200，扫描者照样认为路径存在，只是连首页都看不到了。
+		#    正确写法是显式给出 body，并让状态码与之一致：
+		@machine404 path /api/* /docs* /redoc* /openapi.json /health
+		handle @machine404 {
+			respond "404 not found" 404
+		}
+
+		# ② 其余 404：对用户是「找错了地方」→ 回首页
 		@404 expression {err.status_code} == 404
 		handle @404 {
 			rewrite * /index.html
 			file_server
 		}
-		# 5xx 及其它错误 → 崩溃说明页
-		root * /opt/research-reports/frontend/dist
-		rewrite * /error.html
-		file_server
+
+		# ③ 5xx 及其它错误 → 崩溃说明页
+		#
+		#    ⚠️⚠️ 这一条**必须包在 handle 里**（2026-10-06 实测踩到）。
+		#    裸写 `root * ...` / `rewrite * /error.html` / `file_server` 时，
+		#    它们不带任何匹配条件 → 在 handle_errors 里**无条件执行**，
+		#    而且因为 handle 组的互斥语义被破坏，整条错误处理链会短路掉正常路由：
+		#    实测症状是**所有请求（含首页 /）都返回 `HTTP/2 200` + `content-length: 0`**，
+		#    Caddy 访问日志里 msg = `NOP`、`status: 0`、`size: 0`。
+		#    更隐蔽的是：`caddy validate` 依然输出 `Valid configuration`，
+		#    配置也真的加载进去了（admin API 能看到），只是行为完全错。
+		#    → 结论：**handle_errors 里的每一条分支都要有明确的匹配条件或 handle 包裹。**
+		handle {
+			root * /opt/research-reports/frontend/dist
+			rewrite * /error.html
+			file_server
+		}
 	}
 
 	# ---------- 安全响应头 ----------
@@ -157,6 +198,6 @@ https://203.0.113.10 {
 # 只做 301 跳转、不提供任何内容 —— 这样不存在「用 HTTP 明文传密码」的口子。
 # 代价：外网必须同时放行 443，否则站点访问不了。
 # 若临时需要 HTTP 直连（例如调试），把本段注释掉并 reload 即可。
-http://203.0.113.10 {
+http://{$SITE_ADDRESS} {
 	redir https://{host}{uri} permanent
 }

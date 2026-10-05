@@ -16,6 +16,8 @@ cd "$HERE"
 STAMP="$(date +%Y%m%d-%H%M)"
 OUT_DIR="$HERE/deploy/dist-upload"
 OUT="$OUT_DIR/research-reports-$STAMP.tar.gz"
+# 相对路径版本：仅供 tar -f 使用（`--force-local` 之外的第二重保险，见第 3 步注释）
+OUT_REL="deploy/dist-upload/research-reports-$STAMP.tar.gz"
 mkdir -p "$OUT_DIR"
 
 echo "==> 项目根目录: $HERE"
@@ -83,9 +85,19 @@ echo "    ✓ 无 CR（字节级比对校验）"
 #        deploy/backup-mail.env  SMTP 授权码与收件人
 #      2026-09-17 发现：早期版本漏了 c)，凭证检查正则也抓不到（只匹配名叫 .env 的），
 #      等于每次打包都会把加密口令和邮箱授权码一起装进产物。
+#
+# ⚠️ 2026-10-06 实测踩坑（阻塞级）：`-f` 后跟 **Windows 绝对路径**会失败
+#    `tar -czf C:/Users/.../dist-upload/x.tar.gz ...`
+#    → tar (child): Cannot connect to C: resolve failed
+#    → tar: Child returned status 128 / Error is not recoverable / 退出码 2
+#    根因：tar 的 `-f` 支持 `host:path` 远程语法，冒号前的 `C` 被当成主机名。
+#          （旧版 GNU tar 无此问题；新版默认解析 host:path，Windows 盘符撞上了这个语法）
+#    迷惑点：文件根本没生成，但报错被 `2>/dev/null` 吞掉，只剩一句「tar 退出码 2」；
+#         且手动敲同样命令若用相对路径则正常 → 极易误判为"偶发"。
+#    → 修法：改用**相对路径** + `--force-local`（双保险，两者各自都够用）。
+#    验证：`pack.sh` 从 09-30 起在本机从未跑通（当时是手动绕过），本次修复后才首次全程通过。
 echo "==> 打包"
-tar -czf "$OUT" \
-    --exclude="$OUT" \
+tar --force-local -czf "$OUT_REL" \
     --exclude='deploy/dist-upload' \
     --exclude='frontend/node_modules' \
     --exclude='backend/data' \
@@ -106,7 +118,8 @@ echo
 echo "==> 检查包内是否误含凭证（应当为空）"
 # 宽匹配：任何 *.env / *.pass / *.db / *.rdb 都拦下（example 模板除外）。
 # 不要用「精确文件名」列表 —— 那种写法漏一个就等于没查。
-if tar -tzf "$OUT" | grep -E '\.(env|pass|db|db-wal|rdb)$' | grep -v example; then
+# ⚠️ 读取包同样必须用 OUT_REL + --force-local（理由见第 3 步注释）
+if tar --force-local -tzf "$OUT_REL" | grep -E '\.(env|pass|db|db-wal|rdb)$' | grep -v example; then
     echo "    !! 发现疑似凭证文件，请检查后重新打包"
     rm -f "$OUT"
     exit 1
@@ -115,7 +128,7 @@ else
 fi
 echo
 echo "==> 包内依据目录（应含 reports 与 frontend/dist）"
-TOC="$(tar -tzf "$OUT")"
+TOC="$(tar --force-local -tzf "$OUT_REL")"
 for d in backend frontend/dist worker deploy reports; do
     if printf '%s\n' "$TOC" | grep -qE "(^|/)${d%/*}/|^${d}\$"; then
         printf '    ✓ %s\n' "$d"

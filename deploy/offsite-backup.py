@@ -62,6 +62,11 @@ def pack(dest: Path):
         raise SystemExit("找不到 SQLite 备份（app-*.db.gz）—— 请先确认 backup.sh 正常")
     rdb = newest("dump-*.rdb")
     names = [db.name]
+    # ⚠️ 必须用 Python 的 tarfile，**不要**改成 GNU tar 命令行。
+    #    两者在本机 Windows 上有本质差别：
+    #      tarfile.open(Windows绝对路径)      → 正常
+    #      tar -czf C:/.../x.tar.gz ...        → "Cannot connect to C: resolve failed"（冒号被当成 host:path）
+    #    2026-10-06 已在 pack.sh 上踩到这个坑（阻塞级），记录在该脚本第 3 步注释。
     with tarfile.open(dest, "w:gz") as tf:
         tf.add(db, arcname=db.name)
         if rdb:

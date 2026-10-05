@@ -23,6 +23,7 @@
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
 import urllib.error
@@ -45,11 +46,25 @@ def load_env(path: Path | None = None) -> dict:
             if line and not line.startswith("#") and "=" in line:
                 k, v = line.split("=", 1)
                 cfg[k.strip()] = v.strip()
-    # 缺省值：便于本机直接跑
-    cfg.setdefault("SERVER_URL", "http://127.0.0.1:8080")
-    cfg.setdefault("SKILL_DIR", r"C:\Users\user\.workbuddy\skills\cninfo-report-deep-dive")
-    cfg.setdefault("VENV_PY", r"C:\Users\user\.workbuddy\binaries\python\envs\default\Scripts\python.exe")
-    cfg.setdefault("WORKDIR", str(Path.home() / ".workbuddy-worker"))
+    # ----------------------------------------------------------------
+    # 缺省值：从「惯例位置」推导，**不写死任何绝对路径**。
+    #
+    # ⚠️ 早期版本这里硬编码了 C:\Users\<某人>\... 的绝对路径。问题有三层：
+    #    1) 别人 clone 后拿到的是「一条指向别人电脑的路径」——必然跑不起来，
+    #       而报错信息只会说「找不到目录」，不会提示该改这里；
+    #    2) 路径里带用户名，属于无谓的信息暴露；
+    #    3) 它掩盖了配置错误：worker.env 里忘填时不会报错，而是静默用错路径。
+    #    → 现在改为按 HOME 推导，跨平台通用；填错时下方 _validate() 会明确报出来。
+    # ----------------------------------------------------------------
+    home = Path.home()
+    cfg.setdefault("SERVER_URL", "http://127.0.0.1:8081")
+    # 技能包：优先找 ~/.workbuddy/skills/<名字>，其次 ~/.workbuddy/skills 下的同名目录
+    _skill_root = home / ".workbuddy" / "skills"
+    _skill_guess = _skill_root / "cninfo-report-deep-dive"
+    cfg.setdefault("SKILL_DIR", str(_skill_guess))
+    # Python 解释器：优先当前正在跑 worker 的这个解释器（最不容易错）
+    cfg.setdefault("VENV_PY", sys.executable)
+    cfg.setdefault("WORKDIR", str(home / ".workbuddy-worker"))
     if not cfg.get("WORKER_TOKEN"):
         # 回退：从 backend/app.env 读，省得两份都填
         be = HERE.parent / "backend" / "app.env"
@@ -60,11 +75,89 @@ def load_env(path: Path | None = None) -> dict:
     return cfg
 
 
+def preflight(cfg: dict, *, need_skill: bool = True) -> list[str]:
+    """开工前自检，返回问题列表（空 = 全部就绪）。
+
+    为什么必须做：worker 的失败模式几乎全是「静默用错路径」——
+      · SKILL_DIR 不存在 → 生成出来的研报内容是空的，但任务标记为 success；
+      · VENV_PY 不存在 → 抽取 PDF 时崩在子进程里，报错原文很难懂；
+      · WORKER_TOKEN 为空 → 服务端返回 401，看着像"没任务"。
+    这些都会让人误判成"技能包不好用"或"服务端有问题"，而根因只是配置。
+
+    因此这里把「路径是否存在」「令牌是否已填」显式查一遍，
+    并给出**可操作的修复指引**，而不是等到深处才炸。
+    """
+    problems: list[str] = []
+
+    url = cfg.get("SERVER_URL", "")
+    if not url:
+        problems.append("SERVER_URL 未填（示例：http://127.0.0.1:8081 或 https://<你的站点>）")
+
+    if not cfg.get("WORKER_TOKEN"):
+        problems.append(
+            "WORKER_TOKEN 未填 —— 它是「服务器信任本机」的凭据，"
+            "必须与服务器 app.env 里的值一致（生成：openssl rand -base64 32）"
+        )
+
+    if need_skill:
+        skill = Path(cfg.get("SKILL_DIR") or "")
+        if not str(skill) or not skill.is_dir():
+            problems.append(
+                f"SKILL_DIR 不存在或未填：{skill or '(空)'}\n"
+                f"       → 六维度评判的技能包不在这个位置。请把 worker.env 里的 SKILL_DIR "
+                f"改成你自己的技能包目录（本机默认 ~/.workbuddy/skills/cninfo-report-deep-dive）"
+            )
+
+        venv = Path(cfg.get("VENV_PY") or "")
+        # 允许写成命令名（走 PATH 查找），也允许写绝对路径
+        if not (venv.is_file() or shutil.which(cfg.get("VENV_PY") or "")):
+            problems.append(
+                f"VENV_PY 不是可执行文件：{venv or '(空)'}\n"
+                f"       → 这是跑技能包脚本的 Python，需装 pdfplumber / pypdfium2。"
+                f"可填当前解释器：{sys.executable}"
+            )
+    return problems
+
+
 CFG = load_env()
 TASK_DIR = Path(CFG["WORKDIR"])
 
 
 # ---------------------------------------------------------------- HTTP
+class _KeepMethodRedirect(urllib.request.HTTPRedirectHandler):
+    """跳转时保留原请求方法与请求体。
+
+    urllib 默认对 301/302 会把 POST 降级成 GET（沿袭旧浏览器行为）。
+    本机 worker 的 SERVER_URL 若写成 http://，Caddy 会 301 跳到 https://，
+    于是 submit 的 POST 变成 GET，服务端返回 **405 Method Not Allowed**，
+    而 check/claim 因为是 GET 反而不受影响 —— 现象极易误判成服务端缺路由。
+    实测踩坑：submit 405，改为 https:// 后立即恢复。
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        new = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new is not None and code in (301, 302) and req.get_method() == "POST":
+            new.data = req.data
+            new.method = "POST"
+            ct = req.get_header("Content-type")
+            if ct:
+                new.add_unredirected_header("Content-Type", ct)
+        return new
+
+
+_OPENER = urllib.request.build_opener(
+    _KeepMethodRedirect,
+    # ⚠️ 显式禁用代理。
+    #    urllib 默认会读 HTTP_PROXY / HTTPS_PROXY 环境变量并走系统代理。
+    #    在 Windows 上这会导致连自己的站点也绕一圈代理 → 典型报错：
+    #        URLError: <urlopen error Tunnel connection failed: 502 Bad Gateway>
+    #    现象极具迷惑性：浏览器/curl 打得开，正是 worker 打不开，
+    #    容易误判成"服务端挂了"或"令牌不对"。
+    #    worker 的目标只有自己的站点，直连永远是对的。
+    urllib.request.ProxyHandler({}),
+)
+
+
 def _call(method: str, path: str, body: dict | None = None) -> tuple[int, dict]:
     url = CFG["SERVER_URL"].rstrip("/") + path
     data = json.dumps(body, ensure_ascii=False).encode("utf-8") if body is not None else None
@@ -72,7 +165,7 @@ def _call(method: str, path: str, body: dict | None = None) -> tuple[int, dict]:
     req.add_header("Content-Type", "application/json")
     req.add_header("X-Worker-Token", CFG.get("WORKER_TOKEN", ""))
     try:
-        with urllib.request.urlopen(req, timeout=30) as r:
+        with _OPENER.open(req, timeout=30) as r:
             return r.status, json.loads(r.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         try:
@@ -355,6 +448,100 @@ def cmd_perm_approve(args) -> int:
 
 
 # ---------------------------------------------------------------- 入口
+def cmd_doctor(args) -> int:
+    """配置自检：把 worker 依赖的每一项逐条验一遍，人工可读地报出来。
+
+    设计意图：worker 的坑基本都在「配置错但不报错」。
+    本命令不写任何服务端状态（只对 /health 做一次只读请求）。
+    """
+    print("== Worker 配置自检 ==")
+    ok = True
+
+    def line(label: str, value: str, good: bool, hint: str = ""):
+        nonlocal ok
+        mark = "OK  " if good else "FAIL"
+        print(f" [{mark}] {label}: {value}")
+        if not good:
+            ok = False
+            if hint:
+                print(f"         → {hint}")
+
+    # 1) 配置文件
+    env_path = HERE / "worker.env"
+    line("worker.env", str(env_path), env_path.exists(),
+         "复制模板：cp worker.env.example worker.env，然后填值")
+
+    # 2) 服务端地址
+    url = CFG.get("SERVER_URL", "")
+    line("SERVER_URL", url or "(空)", bool(url),
+         "本机开发填 http://127.0.0.1:8081；驱动线上填 https://<你的站点>")
+
+    # 3) 令牌（不回显内容，只报长度）
+    tok = CFG.get("WORKER_TOKEN", "")
+    line("WORKER_TOKEN", f"已填（{len(tok)} 字符）" if tok else "(空)", bool(tok),
+         "须与服务器 app.env 里的 WORKER_TOKEN 一致")
+
+    # 4) 技能包目录
+    skill = Path(CFG.get("SKILL_DIR") or "")
+    line("SKILL_DIR", str(skill) or "(空)", bool(str(skill)) and skill.is_dir(),
+         "六维度评判技能包所在目录（本机默认 ~/.workbuddy/skills/cninfo-report-deep-dive）")
+
+    # 5) 解释器
+    venv_raw = CFG.get("VENV_PY") or ""
+    venv_ok = bool(venv_raw) and (Path(venv_raw).is_file() or shutil.which(venv_raw) is not None)
+    line("VENV_PY", venv_raw or "(空)", venv_ok,
+         f"需装 pdfplumber / pypdfium2；可直接用当前解释器：{sys.executable}")
+
+    # 6) 工作目录（不存在不算错，会自动创建）
+    wd = Path(CFG.get("WORKDIR") or "")
+    print(f" [info] WORKDIR: {wd}  （{'已存在' if wd.is_dir() else '尚不存在，首次运行会自动创建'}）")
+
+    # 7) 服务端连通性（只读）
+    if url:
+        try:
+            st, r = _call("GET", "/health")
+            if st == 200:
+                print(f" [OK  ] 服务端 /health: {st} {json.dumps(r, ensure_ascii=False)[:110]}")
+            else:
+                ok = False
+                print(f" [FAIL] 服务端 /health 返回 {st}: {json.dumps(r, ensure_ascii=False)[:110]}")
+                if st == 0:
+                    print("         → 连接没有建立（0 = 本地异常，非服务端返回）。常见原因：")
+                    print("           1) 云防火墙未放行 443 —— 症状是**连接超时**（WinError 10060）。")
+                    print("              服务器上自证：ssh 进去跑 curl -sk https://127.0.0.1/health")
+                    print("              返回 200 就说明服务是好的，纯粹是端口没放行。")
+                    print("           2) SERVER_URL 写成 http:// —— Caddy 会 301，POST 变 GET（405）。")
+                    print("           3) 被系统代理拦（报 502 Tunnel failed）—— 本工具已禁用代理。")
+        except Exception as e:  # noqa: BLE001
+            ok = False
+            print(f" [FAIL] 服务端 /health 不可达: {e}")
+            print("         → 常见原因（按可能性排序）：")
+            print("           1) 云防火墙未放行 443 —— 症状是**连接超时**（WinError 10060）。")
+            print("              可在服务器上自证：ssh 进去跑 curl -sk https://127.0.0.1/health")
+            print("              若返回 200，说明服务是好的，纯粹是端口没放行。")
+            print("           2) SERVER_URL 写成 http:// —— Caddy 会 301，POST 变 GET（报 405）。")
+            print("           3) 走系统代理被拦 —— worker 已显式禁用代理，若仍报 502 请查系统代理设置。")
+
+        try:
+            st, r = _call("GET", "/api/worker/tasks/peek")
+            n = r.get("pending_count")
+            if st == 200:
+                print(f" [OK  ] 队列 peek: {st} pending_count={n}"
+                      f"{'（队列为空）' if n == 0 else ''}")
+            else:
+                ok = False
+                print(f" [FAIL] 队列 peek 返回 {st}: {json.dumps(r, ensure_ascii=False)[:110]}")
+                print("         → 多为 WORKER_TOKEN 与服务器不一致（服务端 401）")
+        except Exception as e:  # noqa: BLE001
+            ok = False
+            print(f" [FAIL] 队列 peek 失败: {e}")
+            print("         → 多为 WORKER_TOKEN 与服务器不一致（服务端 401）")
+
+    print()
+    print("结论：" + ("全部就绪 ✅" if ok else "存在未通过项，请按上面提示修正 ❌"))
+    return 0 if ok else 1
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="研报站点 · 本机 Worker")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -405,7 +592,22 @@ def main() -> int:
     a.add_argument("--id", type=int, default=None, dest="id")
     a.set_defaults(fn=cmd_perm_approve)
 
+    sub.add_parser("doctor", help="自检配置（路径/令牌/连通性），不改变任何状态").set_defaults(fn=cmd_doctor)
+
     args = ap.parse_args()
+
+    # 除了 doctor 自身，其余命令都先过一遍自检 ——
+    # 宁可在这里明确拦住，也不要让它跑到一半才炸出费解的报错。
+    if args.fn is not cmd_doctor:
+        need_skill = args.fn in (cmd_fetch, cmd_submit)
+        problems = preflight(CFG, need_skill=need_skill)
+        if problems:
+            print("!! 配置自检未通过，已中止：", file=sys.stderr)
+            for i, p in enumerate(problems, 1):
+                print(f"   {i}) {p}", file=sys.stderr)
+            print("\n   修好 worker.env 后重试；或先跑：python worker.py doctor", file=sys.stderr)
+            return 2
+
     return args.fn(args)
 
 

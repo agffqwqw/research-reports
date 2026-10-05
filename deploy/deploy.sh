@@ -230,7 +230,45 @@ if [ -f "$CADDY_SITE" ] && [ ! -f "${CADDY_SITE}.bak" ]; then
     echo "已备份原配置 → ${CADDY_SITE}.bak"
 fi
 install -m 644 "$(dirname "$0")/Caddyfile" "$CADDY_SITE"
-caddy validate --config "$CADDY_SITE" || die "Caddyfile 校验失败"
+
+# ------------------------------------------------------------
+# 把 SITE_ADDRESS 注入 Caddy
+# ------------------------------------------------------------
+# Caddyfile 里写的是 {$SITE_ADDRESS} 占位符（仓库中不写死真实地址 ——
+# 那既无必要，也等于把服务器坐标公开）。
+#
+# ⚠️ 必须用 systemd drop-in，不能只写进 app.env：
+#    Caddy 由**独立的 caddy.service** 运行（官方单元，User=caddy），
+#    它的 Environment= 是空的，且**不会**读你项目的 app.env。
+#    所以要把变量单独投喂给它。
+#
+# 值从后端 app.env 的 SITE_ADDRESS 读；读不到则从 APP_BASE_URL 推导。
+SITE_ADDRESS="$(grep -E '^SITE_ADDRESS=' "$ENV_FILE" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '[:space:]')"
+if [ -z "$SITE_ADDRESS" ]; then
+    # 回退：从 APP_BASE_URL（形如 https://1.2.3.4）推导主机部分
+    SITE_ADDRESS="$(grep -E '^APP_BASE_URL=' "$ENV_FILE" 2>/dev/null | tail -1 \
+        | sed -E 's#^[^=]+=##; s#^[a-zA-Z]+://##; s#/.*$##; s#:[0-9]+$##' | tr -d '[:space:]')"
+fi
+if [ -z "$SITE_ADDRESS" ]; then
+    die "无法确定站点地址：请在 ${ENV_FILE} 里设 SITE_ADDRESS=<你的域名或公网IP>"
+fi
+echo "  站点地址（注入 Caddy）= ${SITE_ADDRESS}"
+
+mkdir -p /etc/systemd/system/caddy.service.d
+cat > /etc/systemd/system/caddy.service.d/site-address.conf <<EOF
+# 由 research-reports 的 deploy.sh 自动生成，请勿手工编辑。
+# 作用：把站点地址投喂给 Caddy，供 Caddyfile 里的 {\$SITE_ADDRESS} 使用。
+[Service]
+Environment=SITE_ADDRESS=${SITE_ADDRESS}
+EOF
+systemctl daemon-reload
+echo "  已写入 drop-in → /etc/systemd/system/caddy.service.d/site-address.conf"
+
+# ⚠️ validate 必须**带上同一个环境变量**，否则会因 {$SITE_ADDRESS} 展开为空而报
+#      "wrong argument count ... after 'default_sni'" —— 实测确认。
+#    注意这只是让校验能跑；服务真正生效靠上面的 drop-in（systemd 注入）。
+SITE_ADDRESS="$SITE_ADDRESS" caddy validate --config "$CADDY_SITE" \
+    || die "Caddyfile 校验失败（检查 SITE_ADDRESS 是否为合法域名/IP）"
 
 # ⚠️ 关键：caddy validate 是**以 root 身份**执行的，而 Caddy 加载配置时会
 #    打开日志文件 —— 于是日志文件被创建成 root:root 600。
