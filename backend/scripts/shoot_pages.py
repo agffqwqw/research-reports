@@ -2,17 +2,24 @@
 """用 Playwright + 系统 Edge 截取各页面（仅本机预览用）"""
 import os
 import sys
+from pathlib import Path
 
 sys.stdout.reconfigure(encoding="utf-8")
 from playwright.sync_api import sync_playwright  # noqa: E402
 
-OUT = r"C:\Users\user\WorkBuddy\2026-09-09-11-16-03\research-reports\docs\screenshots"
+# 截图输出目录：以**本脚本位置**为基准推导（脚本在 backend/scripts/ 下）。
+# ⚠️ 不要写死绝对路径 —— 那会让别人 clone 后直接跑不起来，也把本机目录结构暴露出去。
+OUT = str(Path(__file__).resolve().parents[2] / "docs" / "screenshots")
 BASE = "http://127.0.0.1:5173"
 os.makedirs(OUT, exist_ok=True)
 
-# 优先用国内源下载的独立 Chromium（可移植、不依赖系统 Edge）；
-# 没有则回退到系统 Edge。
-CHROMIUM_EXE = r"C:\Users\user\.workbuddy\binaries\chromium\chrome-win\chrome.exe"
+# 可选：独立 Chromium（可移植、不依赖系统 Edge）。
+# 优先取环境变量 CHROMIUM_EXE；否则探测常见位置；都没有就回退系统 Edge。
+CHROMIUM_EXE = os.environ.get("CHROMIUM_EXE", "").strip()
+if not CHROMIUM_EXE:
+    _guess = Path.home() / ".workbuddy" / "binaries" / "chromium" / "chrome-win" / "chrome.exe"
+    if _guess.exists():
+        CHROMIUM_EXE = str(_guess)
 
 
 def launch(p):
