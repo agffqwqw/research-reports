@@ -124,8 +124,14 @@ def update_report(code: str, period: str, data: ReportPatch,
 
         obj["dims"] = dims
         # 记录人工修订痕迹（不改 meta 里的来源字段）
-        obj.setdefault("meta", {})["last_edited_at"] = now()
-        obj["meta"]["last_edited_by"] = user.get("email", "")
+        _meta = obj.setdefault("meta", {})
+        _meta["last_edited_at"] = now()
+        # ⚠️ 这里**只能写非 PII 的标识**，绝不要写邮箱（2026-10-06 修）。
+        #    原因：meta 会随 reports/*.json 归档，而 reports/ 是**刻意公开**的
+        #    （数据来自巨潮公开披露）。此前写的是 user["email"]，于是操作者的
+        #    个人邮箱被自动带进了公开仓库 —— 而那个邮箱同时暴露了手机号。
+        #    需要精确到人的修订记录时，查 SQLite / 审计日志，不要放进对外内容里。
+        _meta["last_edited_by"] = user.get("role") or "admin"
 
         conn.execute(
             "UPDATE report SET content_json = ?, updated_at = ? WHERE id = ?",

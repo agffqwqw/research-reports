@@ -32,20 +32,69 @@ import argparse
 import datetime
 import json
 import os
+import shutil
 import subprocess
 import sys
 
-SSH = r"C:\Windows\System32\OpenSSH\ssh.exe"
-# 支持环境变量覆盖，便于测试「服务器不可达」这类路径
-HOST = os.environ.get("WATCH_HOST", "root@203.0.113.10")
-# 站点对外地址（证书 SAN / Caddy site 块用的就是它）。
-# 探测时用 --resolve 把它指到 127.0.0.1，这样 SNI 与 Host 都是真实域名/IP，
-# 才能命中 Caddy 的 site 块，而不是落到默认站点上。
-SITE = os.environ.get("WATCH_SITE", "203.0.113.10")
+HERE = os.path.dirname(os.path.abspath(__file__))
+
+
+def _load_local_env(path: str) -> dict:
+    """读取本地 .env 风格的配置文件（KEY=VALUE），文件不存在则返回空 dict。
+
+    为什么需要它（2026-10-06 修）：
+      本脚本此前把服务器地址**写成环境变量的默认值**，形如
+      `os.environ.get("WATCH_HOST", "root@<真实IP>")`。那份默认值会随仓库
+      公开而泄漏服务器坐标与登录名。
+      改为「环境变量 → 本地 watch.env → 明确报错」三级之后：
+        · 仓库里只剩占位符（别人 clone 看不到任何真实地址）
+        · 本机把真实值放进 worker/watch.env（已被 .gitignore 排除），零改动继续跑
+    """
+    data: dict = {}
+    if not os.path.isfile(path):
+        return data
+    with open(path, "r", encoding="utf-8") as f:
+        for raw in f:
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            data[k.strip()] = v.strip().strip('"').strip("'")
+    return data
+
+
+_LOCAL = _load_local_env(os.path.join(HERE, "watch.env"))
+
+
+def _cfg(key: str, default: str = "") -> str:
+    """优先级：真实环境变量 > 本地 watch.env > default。"""
+    return os.environ.get(key) or _LOCAL.get(key, default)
+
+
+# ssh 可执行文件：Windows 下 OpenSSH 有固定路径，其它平台退回 PATH 上的 ssh
+_win_ssh = r"C:\Windows\System32\OpenSSH\ssh.exe"
+SSH = _cfg("WATCH_SSH") or (_win_ssh if os.path.exists(_win_ssh)
+                            else (shutil.which("ssh") or "ssh"))
+
+# 探测目标（**仓库内不写死任何真实地址**）
+#   WATCH_HOST：ssh 目标，形如 user@your-host
+#   WATCH_SITE：站点对外地址（证书 SAN / Caddy site 块用的就是它）。
+#     探测时用 --resolve 把它指到 127.0.0.1，这样 SNI 与 Host 都是真实域名/IP，
+#     才能命中 Caddy 的 site 块，而不是落到默认站点上。
+HOST = _cfg("WATCH_HOST")
+SITE = _cfg("WATCH_SITE")
+if not HOST or not SITE:
+    sys.stderr.write(
+        "✗ 未配置探测目标，无法运行。任选一种方式：\n"
+        "  1) 设环境变量：WATCH_HOST=user@your-host  WATCH_SITE=your-host\n"
+        "  2) 复制模板后填写：cp worker/watch.env.example worker/watch.env\n"
+        "  （watch.env 已被 .gitignore 排除，不会进版本库）\n"
+    )
+    sys.exit(3)
+
 SERVICES = ["research-reports", "caddy", "redis-server"]
 DISK_WARN_PCT = 85
 
-HERE = os.path.dirname(os.path.abspath(__file__))
 STATE_FILE = os.path.join(HERE, ".server_watch_state.json")
 
 REMOTE_SCRIPT = "\n".join([

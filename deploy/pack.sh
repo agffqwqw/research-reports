@@ -20,6 +20,12 @@ OUT="$OUT_DIR/research-reports-$STAMP.tar.gz"
 OUT_REL="deploy/dist-upload/research-reports-$STAMP.tar.gz"
 mkdir -p "$OUT_DIR"
 
+# 部署目标（仅用于最后打印提示，不参与打包）。
+# ⚠️ 仓库里**不写死**真实地址 —— 那等于公开服务器坐标与登录名。
+#    要用可复制的提示命令，就在本机设环境变量：
+#        export DEPLOY_HOST=user@your-server
+DEPLOY_HOST="${DEPLOY_HOST:-<user>@<your-server>}"
+
 echo "==> 项目根目录: $HERE"
 
 # ---------- 1. 前端构建 ----------
@@ -138,5 +144,5 @@ for d in backend frontend/dist worker deploy reports; do
 done
 echo
 echo "==> 下一步（手工执行，本脚本不会代劳）："
-echo "    scp $OUT root@203.0.113.10:/tmp/"
+echo "    scp $OUT $DEPLOY_HOST:/tmp/"
 echo "    然后按 deploy/README.md 第 3 节解包部署"

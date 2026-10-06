@@ -162,11 +162,15 @@ python worker.py fail 3 "未找到 2026 年半年度报告正文"
 必须绕过它用 node 直接调用：
 
 ```bash
-cd C:\Users\user\.workbuddy\binaries\node\cli-connector-packages
-"C:\Users\user\.workbuddy\binaries\node\versions\22.22.2-3\node.exe" \
+cd C:\Users\<你的用户名>\.workbuddy\binaries\node\cli-connector-packages
+"C:\Users\<你的用户名>\.workbuddy\binaries\node\versions\<版本>\node.exe" \
     node_modules/@larksuite/cli/scripts/run.js im +messages-send \
-    --as bot --user-id ou_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx --markdown $'...'
+    --as bot --user-id ou_<收件人的 open_id> --markdown $'...'
 ```
 
 > ⚠️ **发送必须用 `--as bot`**：user 身份缺 `im:message.send_as_user` scope，
 > 用 `--as user` 会被拒。bot 身份可用。
+>
+> ⚠️ **open_id 不要写进仓库**：它是收件人的稳定标识，写进公开仓库等于对外
+> 公开管理员账号标识。真实值放在本机的 `worker.env` 里（已被 .gitignore 排除），
+> 形如 `FEISHU_ADMIN_OPEN_ID=ou_xxxx`。
