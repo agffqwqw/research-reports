@@ -1,8 +1,43 @@
 # 上市公司研报站点
 
-> 输入股票代码 → 自动抓取巨潮资讯网定期报告 → AI 按**六维度**评判 → 生成结构化研报并入库展示。
+> **输入股票代码 → 自动抓取巨潮资讯网定期报告 → AI 按六维度评判 → 生成结构化研报并入库展示。**
 >
-> 一个完整的「有鉴权、有限流、可备份、可重建」的中小型 Web 应用实例。
+> 一个**从抓取、AI 生成，到鉴权、限流、部署、备份、灾备重建全链路自己实现**的中小型 Web 应用。
+
+![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)
+![FastAPI](https://img.shields.io/badge/FastAPI-uvicorn-009688?logo=fastapi&logoColor=white)
+![Vue](https://img.shields.io/badge/Vue-3-4FC08D?logo=vuedotjs&logoColor=white)
+![SQLite](https://img.shields.io/badge/SQLite-003B57?logo=sqlite&logoColor=white)
+![Redis](https://img.shields.io/badge/Redis-DC382D?logo=redis&logoColor=white)
+![Caddy](https://img.shields.io/badge/Caddy-1F88C0?logo=caddy&logoColor=white)
+![License](https://img.shields.io/badge/License-MIT-green)
+
+---
+
+## 效果预览
+
+| 研报列表 | 研报详情 |
+|:---:|:---:|
+| ![研报列表](docs/screenshots/01-list.png) | ![研报详情](docs/screenshots/02-detail.png) |
+| **行业筛选** | **登录鉴权** |
+| ![行业筛选](docs/screenshots/06-list-alpha-filter.png) | ![登录](docs/screenshots/04-login.png) |
+
+---
+
+## 这份代码里值得一看的地方
+
+> 给「想快速判断工程能力」的读者 —— 挑的是**能体现取舍与踩过坑**的点，不是功能清单。
+
+| # | 点 | 说明 |
+|:-:|:---|:---|
+| 1 | **无域名 / 无备案下跑 HTTPS** | 用 Caddy 内置 CA 自签；并处理了「CA 中间证书默认只有 7 天，会把叶子证书**静默压缩**」这个陷阱 |
+| 2 | **双层限流，分工明确** | fail2ban 治慢速爆破（拦在网络层、不耗应用资源），slowapi 治瞬时爆发；配额走 Redis，**Redis 挂掉自动降级为内存计数** |
+| 3 | **边沿触发的健康告警** | 同一故障**只报一次**、恢复时再报 —— 避免"每分钟一条"把告警刷成噪音，最后没人看 |
+| 4 | **接口文档 fail-closed** | `/docs` 默认**关闭**（而非默认开再记得关）；且反代层必须**显式透传**，否则会被 SPA 回退吞成 HTTP 200，语义上等于告诉扫描者"路径存在" |
+| 5 | **幂等部署 + 自动备份 + 回滚** | `deploy.sh` 可重复执行；覆盖前自动备份；代码与数据分离回滚 |
+| 6 | **灾备演练真的跑过** | ③ 级全清空重建演练实测端到端 **RTO ≈ 18 分钟**，4 个服务无人工干预自动恢复 |
+| 7 | **打包即安全闸门** | `pack.sh` 强制归一 LF、**扫描并拒绝含凭证的产物**、排除数据库与密钥；行尾用字节级校验而非"看起来对" |
+| 8 | **结论可回溯** | 六维度不只给评级，还附一句话结论 + 带标签的逐条证据，能回到公告原文 —— 而不是给一个孤立的分值 |
 
 ---
 
