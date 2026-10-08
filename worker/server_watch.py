@@ -35,6 +35,7 @@ import os
 import shutil
 import subprocess
 import sys
+from email.utils import parsedate_to_datetime
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -94,6 +95,12 @@ if not HOST or not SITE:
 
 SERVICES = ["research-reports", "caddy", "redis-server"]
 DISK_WARN_PCT = 85
+# 证书剩余天数低于此值即告警（2026-10-08 新增）。
+# 背景：站点改用 Let's Encrypt 的 **IP 证书**，而 IP 证书被 LE 强制要求用
+# `shortlived` profile ⇒ **有效期只有 160 小时（约 6.7 天）**。
+# 续期依赖 **80 端口的 http-01 验证**；一旦续期失败，证书过期后
+# 站点会**直接打不开（不是降级，是连不上）**。所以剩余天数必须盯住。
+CERT_WARN_DAYS = 2
 
 STATE_FILE = os.path.join(HERE, ".server_watch_state.json")
 
@@ -114,6 +121,16 @@ REMOTE_SCRIPT = "\n".join([
     '--resolve %s:443:127.0.0.1 https://%s/)"' % (SITE, SITE),
     "echo \"DISK $(df -P / | awk 'NR==2 {print $5}' | tr -d '%')\"",
     'echo "RESTARTS $(systemctl show research-reports -p NRestarts --value 2>/dev/null || echo 0)"',
+    # ---------- 证书到期（2026-10-08 新增）----------
+    # 取 443 上实际使用的证书的到期时间与签发者。
+    # ⚠️ 必须带 -servername：客户端用 IP 访问时不发 SNI，不指定就握手不到站点证书。
+    # 输出形如：CERT_END Oct 14 22:28:03 2026 GMT
+    #          CERT_ISSUER C = US, O = Let's Encrypt, CN = YE1
+    # 取不到时该行会退化成 "CERT_END"（无空格）→ 解析时视为缺失并报故障。
+    'echo "CERT_END $(echo | timeout 8 openssl s_client -connect 127.0.0.1:443 '
+    '-servername %s 2>/dev/null | openssl x509 -noout -enddate 2>/dev/null | cut -d= -f2)"' % SITE,
+    'echo "CERT_ISSUER $(echo | timeout 8 openssl s_client -connect 127.0.0.1:443 '
+    '-servername %s 2>/dev/null | openssl x509 -noout -issuer 2>/dev/null | sed \'s/^issuer=//\')"' % SITE,
 ])
 
 
@@ -216,6 +233,35 @@ def collect_problems():
     if restarts >= 5:
         notes.append("服务已重启 %d 次，可能存在反复崩溃" % restarts)
 
+    # ---------- 证书到期（2026-10-08 新增）----------
+    # 背景：站点改用 LE 的 IP 证书，有效期仅 ~6.7 天，续期依赖 80 端口可达。
+    # 续期静默失败 ⇒ 证书过期 ⇒ 站点直接打不开。所以必须主动盯剩余天数。
+    cert_end = data.get("CERT_END", "").strip()
+    cert_issuer = data.get("CERT_ISSUER", "").strip()
+    cert_days = None
+    if cert_end:
+        try:
+            dt = parsedate_to_datetime(cert_end)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=datetime.timezone.utc)
+            cert_days = (dt - datetime.datetime.now(datetime.timezone.utc)).total_seconds() / 86400.0
+        except (TypeError, ValueError):
+            cert_days = None
+
+    if cert_days is None:
+        problems.append("取不到 HTTPS 证书到期时间 —— 443 上的证书异常，或证书已失效")
+    elif cert_days <= 0:
+        problems.append("HTTPS 证书**已过期**（%.1f 天前）—— 站点此时应已无法访问" % (-cert_days))
+    elif cert_days < CERT_WARN_DAYS:
+        problems.append(
+            "HTTPS 证书仅剩 %.1f 天（阈值 %d 天）—— 自动续期可能已失败。"
+            "IP 证书续期走 80 端口的 http-01，请检查云防火墙是否仍放行 80"
+            % (cert_days, CERT_WARN_DAYS))
+
+    # 换成 LE 后签发者不再是自签 CA；若变回去，说明 Caddyfile 被改回 internal issuer
+    if "Caddy Local Authority" in cert_issuer:
+        notes.append("当前证书是 Caddy 自签（非 Let's Encrypt）—— 访客浏览器会显示安全警告")
+
     for name, state in svc_pairs:
         details.append("  %-20s %s" % (name, state))
     details.append("  %-20s HTTP %s" % ("后端 /health", health_code))
@@ -223,6 +269,9 @@ def collect_problems():
     details.append("  %-20s HTTP %s" % ("80 端口跳转", redir_code))
     details.append("  %-20s %s" % ("磁盘使用率", ("%d%%" % disk) if disk >= 0 else "?"))
     details.append("  %-20s %d 次" % ("服务重启次数", restarts))
+    details.append("  %-20s %s" % ("HTTPS 证书剩余",
+                                   ("%.1f 天" % cert_days) if cert_days is not None else "?"))
+    details.append("  %-20s %s" % ("HTTPS 证书签发者", (cert_issuer[:58] or "?")))
 
     return problems, details, notes
 
